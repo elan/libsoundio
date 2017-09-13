@@ -381,6 +381,34 @@ static bool all_channels_invalid(const struct SoundIoChannelLayout *layout) {
     return true;
 }
 
+static bool flag_in_format(uint32_t formatFlags, uint32_t flag) {
+    return ((formatFlags & flag) == flag);
+}
+
+static enum SoundIoFormat from_ca_asbd(AudioStreamBasicDescription *desc) {
+    uint32_t formatFlags = desc->mFormatFlags;
+    if (flag_in_format(formatFlags, kAudioFormatFlagIsFloat)) {
+        if (desc->mBitsPerChannel == 32) {
+            return SoundIoFormatFloat32LE;
+        }
+        if (desc->mBitsPerChannel == 64) {
+            return SoundIoFormatFloat64LE;
+        }
+    }
+    if (flag_in_format(formatFlags, kAudioFormatFlagIsSignedInteger)) {
+        if (desc->mBitsPerChannel == 16) {
+            return SoundIoFormatS16LE;
+        }
+        if (desc->mBitsPerChannel == 24) {
+            return SoundIoFormatS24LE;
+        }
+        if (desc->mBitsPerChannel == 32) {
+            return SoundIoFormatS32LE;
+        }
+    }
+    return SoundIoFormatInvalid;
+}
+
 struct RefreshDevices {
     struct SoundIoPrivate *si;
     struct SoundIoDevicesInfo *devices_info;
@@ -390,7 +418,8 @@ struct RefreshDevices {
     char *device_name;
     int device_name_len;
     AudioBufferList *buffer_list;
-    struct SoundIoDevice *device;
+    struct SoundIoDevice *device_shared;
+    struct SoundIoDevice *device_raw;
     AudioChannelLayout *audio_channel_layout;
     char *device_uid;
     int device_uid_len;
@@ -407,7 +436,8 @@ static void deinit_refresh_devices(struct RefreshDevices *rd) {
         CFRelease(rd->string_ref);
     free(rd->device_name);
     free(rd->buffer_list);
-    soundio_device_unref(rd->device);
+    soundio_device_unref(rd->device_shared);
+    soundio_device_unref(rd->device_raw);
     free(rd->audio_channel_layout);
     free(rd->device_uid);
     free(rd->avr_array);
@@ -580,23 +610,46 @@ static int refresh_devices(struct SoundIoPrivate *si) {
             if (channel_count <= 0)
                 continue;
 
-            struct SoundIoDevicePrivate *dev = ALLOCATE(struct SoundIoDevicePrivate, 1);
-            if (!dev) {
+            struct SoundIoDevicePrivate *dev_shared = ALLOCATE(struct SoundIoDevicePrivate, 1);
+            if (!dev_shared) {
                 deinit_refresh_devices(&rd);
                 return SoundIoErrorNoMem;
             }
-            struct SoundIoDeviceCoreAudio *dca = &dev->backend_data.coreaudio;
-            dca->device_id = device_id;
-            assert(!rd.device);
-            rd.device = &dev->pub;
-            rd.device->ref_count = 1;
-            rd.device->soundio = soundio;
-            rd.device->is_raw = false;
-            rd.device->aim = aim;
-            rd.device->id = soundio_str_dupe(rd.device_uid, rd.device_uid_len);
-            rd.device->name = soundio_str_dupe(rd.device_name, rd.device_name_len);
 
-            if (!rd.device->id || !rd.device->name) {
+            struct SoundIoDeviceCoreAudio *dca_shared = &dev_shared->backend_data.coreaudio;
+            dca_shared->device_id = device_id;
+            assert(!rd.device_shared);
+            rd.device_shared = &dev_shared->pub;
+            rd.device_shared->ref_count = 1;
+            rd.device_shared->soundio = soundio;
+            rd.device_shared->is_raw = false;
+            rd.device_shared->aim = aim;
+            rd.device_shared->id = soundio_str_dupe(rd.device_uid, rd.device_uid_len);
+            rd.device_shared->name = soundio_str_dupe(rd.device_name, rd.device_name_len);
+
+            if (!rd.device_shared->id || !rd.device_shared->name) {
+                deinit_refresh_devices(&rd);
+                return SoundIoErrorNoMem;
+            }
+
+            struct SoundIoDevicePrivate *dev_raw = ALLOCATE(struct SoundIoDevicePrivate, 1);
+            if (!dev_raw) {
+                deinit_refresh_devices(&rd);
+                return SoundIoErrorNoMem;
+            }
+
+            struct SoundIoDeviceCoreAudio *dca_raw = &dev_raw->backend_data.coreaudio;
+            dca_raw->device_id = device_id;
+            assert(!rd.device_raw);
+            rd.device_raw = &dev_raw->pub;
+            rd.device_raw->ref_count = 1;
+            rd.device_raw->soundio = soundio;
+            rd.device_raw->is_raw = true;
+            rd.device_raw->aim = aim;
+            rd.device_raw->id = soundio_str_dupe(rd.device_uid, rd.device_uid_len);
+            rd.device_raw->name = soundio_str_dupe(rd.device_name, rd.device_name_len);
+
+            if (!rd.device_raw->id || !rd.device_raw->name) {
                 deinit_refresh_devices(&rd);
                 return SoundIoErrorNoMem;
             }
@@ -618,28 +671,41 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                     deinit_refresh_devices(&rd);
                     return SoundIoErrorOpeningDevice;
                 }
-                if ((err = from_coreaudio_layout(rd.audio_channel_layout, &rd.device->current_layout))) {
-                    rd.device->current_layout.channel_count = channel_count;
+                if ((err = from_coreaudio_layout(rd.audio_channel_layout, &rd.device_shared->current_layout))) {
+                    rd.device_shared->current_layout.channel_count = channel_count;
+                }
+                if ((err = from_coreaudio_layout(rd.audio_channel_layout, &rd.device_raw->current_layout))) {
+                    rd.device_raw->current_layout.channel_count = channel_count;
                 }
             }
-            if (all_channels_invalid(&rd.device->current_layout)) {
+            if (all_channels_invalid(&rd.device_shared->current_layout)) {
                 const struct SoundIoChannelLayout *guessed_layout =
                     soundio_channel_layout_get_default(channel_count);
                 if (guessed_layout)
-                    rd.device->current_layout = *guessed_layout;
+                    rd.device_shared->current_layout = *guessed_layout;
             }
 
-            rd.device->layout_count = 1;
-            rd.device->layouts = &rd.device->current_layout;
+            if (all_channels_invalid(&rd.device_raw->current_layout)) {
+                const struct SoundIoChannelLayout *guessed_layout =
+                    soundio_channel_layout_get_default(channel_count);
+                if (guessed_layout)
+                    rd.device_raw->current_layout = *guessed_layout;
+            }
 
-            rd.device->format_count = 4;
-            rd.device->formats = ALLOCATE(enum SoundIoFormat, rd.device->format_count);
-            if (!rd.device->formats)
+            rd.device_shared->layout_count = 1;
+            rd.device_shared->layouts = &rd.device_shared->current_layout;
+
+            rd.device_raw->layout_count = 1;
+            rd.device_raw->layouts = &rd.device_raw->current_layout;
+
+            rd.device_shared->format_count = 4;
+            rd.device_shared->formats = ALLOCATE(enum SoundIoFormat, rd.device_shared->format_count);
+            if (!rd.device_shared->formats)
                 return SoundIoErrorNoMem;
-            rd.device->formats[0] = SoundIoFormatS16LE;
-            rd.device->formats[1] = SoundIoFormatS32LE;
-            rd.device->formats[2] = SoundIoFormatFloat32LE;
-            rd.device->formats[3] = SoundIoFormatFloat64LE;
+            rd.device_shared->formats[0] = SoundIoFormatS16LE;
+            rd.device_shared->formats[1] = SoundIoFormatS32LE;
+            rd.device_shared->formats[2] = SoundIoFormatFloat32LE;
+            rd.device_shared->formats[3] = SoundIoFormatFloat64LE;
 
             prop_address.mSelector = kAudioDevicePropertyNominalSampleRate;
             prop_address.mScope = aim_to_scope(aim);
@@ -657,15 +723,15 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                 deinit_refresh_devices(&rd);
                 return SoundIoErrorIncompatibleDevice;
             }
-            rd.device->sample_rate_current = (int)floored_value;
+            rd.device_shared->sample_rate_current = (int)floored_value;
 
             // If you try to open an input stream with anything but the current
             // nominal sample rate, AudioUnitRender returns an error.
             if (aim == SoundIoDeviceAimInput) {
-                rd.device->sample_rate_count = 1;
-                rd.device->sample_rates = &dev->prealloc_sample_rate_range;
-                rd.device->sample_rates[0].min = rd.device->sample_rate_current;
-                rd.device->sample_rates[0].max = rd.device->sample_rate_current;
+                rd.device_shared->sample_rate_count = 1;
+                rd.device_shared->sample_rates = &dev_shared->prealloc_sample_rate_range;
+                rd.device_shared->sample_rates[0].min = rd.device_shared->sample_rate_current;
+                rd.device_shared->sample_rates[0].max = rd.device_shared->sample_rate_current;
             } else {
                 prop_address.mSelector = kAudioDevicePropertyAvailableNominalSampleRates;
                 prop_address.mScope = aim_to_scope(aim);
@@ -692,14 +758,14 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                 }
 
                 if (avr_array_len == 1) {
-                    rd.device->sample_rate_count = 1;
-                    rd.device->sample_rates = &dev->prealloc_sample_rate_range;
-                    rd.device->sample_rates[0].min = ceil_dbl_to_int(rd.avr_array[0].mMinimum);
-                    rd.device->sample_rates[0].max = (int)(rd.avr_array[0].mMaximum);
+                    rd.device_shared->sample_rate_count = 1;
+                    rd.device_shared->sample_rates = &dev_shared->prealloc_sample_rate_range;
+                    rd.device_shared->sample_rates[0].min = ceil_dbl_to_int(rd.avr_array[0].mMinimum);
+                    rd.device_shared->sample_rates[0].max = (int)(rd.avr_array[0].mMaximum);
                 } else {
-                    rd.device->sample_rate_count = avr_array_len;
-                    rd.device->sample_rates = ALLOCATE(struct SoundIoSampleRateRange, avr_array_len);
-                    if (!rd.device->sample_rates) {
+                    rd.device_shared->sample_rate_count = avr_array_len;
+                    rd.device_shared->sample_rates = ALLOCATE(struct SoundIoSampleRateRange, avr_array_len);
+                    if (!rd.device_shared->sample_rates) {
                         deinit_refresh_devices(&rd);
                         return SoundIoErrorNoMem;
                     }
@@ -707,10 +773,145 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                         AudioValueRange *avr = &rd.avr_array[i];
                         int min_val = ceil_dbl_to_int(avr->mMinimum);
                         int max_val = (int)(avr->mMaximum);
-                        rd.device->sample_rates[i].min = min_val;
-                        rd.device->sample_rates[i].max = max_val;
+                        rd.device_shared->sample_rates[i].min = min_val;
+                        rd.device_shared->sample_rates[i].max = max_val;
                     }
                 }
+            }
+
+            prop_address.mSelector = kAudioDevicePropertyStreams;
+            prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+            prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+            if ((os_err = AudioObjectGetPropertyDataSize(device_id, &prop_address, 0, NULL,
+                    &io_size)))
+            {
+                deinit_refresh_devices(&rd);
+                return SoundIoErrorOpeningDevice;
+            }
+
+            AudioStreamID *hardware_stream_ids = (AudioStreamID *)ALLOCATE_NONZERO(char, io_size);
+
+            if ((os_err = AudioObjectGetPropertyData(device_id, &prop_address, 0, NULL,
+                    &io_size, hardware_stream_ids)))
+            {
+                deinit_refresh_devices(&rd);
+                return SoundIoErrorOpeningDevice;
+            }
+
+            int stream_count = io_size / sizeof(AudioStreamID);
+
+            for (int i = 0; i < stream_count; i++)
+            {
+                AudioStreamID stream_id = hardware_stream_ids[i];
+
+                prop_address.mSelector = kAudioStreamPropertyDirection;
+                prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+                prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+
+                io_size = sizeof(uint32_t);
+                uint32_t direction = -1;
+
+                if ((os_err = AudioObjectGetPropertyData(stream_id, &prop_address, 0, NULL, &io_size, &direction)))
+                {
+                    deinit_refresh_devices(&rd);
+                    return SoundIoErrorOpeningDevice;
+                }
+
+                // @constant       kAudioStreamPropertyDirection
+                //        A UInt32 where a value of 0 means that this AudioStream is an output stream
+                //        and a value of 1 means that it is an input stream.
+                if (aim == direction) {
+                    continue;
+                }
+
+                prop_address.mSelector = kAudioStreamPropertyAvailablePhysicalFormats;
+                prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+                prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+                if ((os_err = AudioObjectGetPropertyDataSize(stream_id, &prop_address, 0, NULL, &io_size)))
+                {
+                    deinit_refresh_devices(&rd);
+                    return SoundIoErrorOpeningDevice;
+                }
+
+                AudioStreamRangedDescription *asrds = (AudioStreamRangedDescription *)ALLOCATE_NONZERO(char, io_size);
+                int asrd_count = io_size / sizeof(AudioStreamRangedDescription);
+
+                if ((os_err = AudioObjectGetPropertyData(stream_id, &prop_address, 0, NULL, &io_size, asrds)))
+                {
+                    deinit_refresh_devices(&rd);
+                    return SoundIoErrorOpeningDevice;
+                }
+
+                int unique_sample_rates_count = 0;
+                AudioValueRange *unique_sample_rates = ALLOCATE(AudioValueRange, asrd_count);
+
+                int unique_formats_count = 0;
+                enum SoundIoFormat *unique_formats = ALLOCATE(enum SoundIoFormat, asrd_count);
+
+                bool is_unique;
+                for (int j = 0; j < asrd_count; j++)
+                {
+                    AudioStreamRangedDescription asrd = asrds[j];
+                    is_unique = true;
+
+                    for (int k = 0; k < unique_sample_rates_count; k++) {
+                        if (unique_sample_rates[k].mMinimum == asrd.mSampleRateRange.mMinimum &&
+                            unique_sample_rates[k].mMaximum == asrd.mSampleRateRange.mMaximum)
+                        {
+                            is_unique = false;
+                            break;
+                        }
+                    }
+                    if (is_unique)
+                    {
+                        unique_sample_rates[unique_sample_rates_count++] = asrd.mSampleRateRange;
+                    }
+
+                    enum SoundIoFormat asrd_format = from_ca_asbd(&asrd.mFormat);
+                    is_unique = true;
+
+                    for (int k = 0; k < unique_formats_count; k++) {
+                        if (unique_formats[k] == asrd_format)
+                        {
+                            is_unique = false;
+                            break;
+                        }
+                    }
+
+                    if (is_unique)
+                    {
+                        unique_formats[unique_formats_count++] = asrd_format;
+                    }
+                }
+                free(hardware_stream_ids);
+                free(asrds);
+
+                if (unique_sample_rates_count == 1) {
+                    rd.device_raw->sample_rate_count = 1;
+                    rd.device_raw->sample_rates = &dev_raw->prealloc_sample_rate_range;
+                    rd.device_raw->sample_rates[0].min = ceil_dbl_to_int(unique_sample_rates[0].mMinimum);
+                    rd.device_raw->sample_rates[0].max = (int)(unique_sample_rates[0].mMaximum);
+                } else {
+                    rd.device_raw->sample_rate_count = unique_sample_rates_count;
+                    rd.device_raw->sample_rates = ALLOCATE(struct SoundIoSampleRateRange, unique_sample_rates_count);
+                    if (!rd.device_raw->sample_rates) {
+                        deinit_refresh_devices(&rd);
+                        return SoundIoErrorNoMem;
+                    }
+                    for (int i = 0; i < unique_sample_rates_count; i += 1) {
+                        AudioValueRange *avr = &unique_sample_rates[i];
+                        int min_val = ceil_dbl_to_int(avr->mMinimum);
+                        int max_val = (int)(avr->mMaximum);
+                        rd.device_raw->sample_rates[i].min = min_val;
+                        rd.device_raw->sample_rates[i].max = max_val;
+                    }
+                }
+
+				rd.device_raw->format_count = unique_formats_count;
+				rd.device_raw->formats = unique_formats;
             }
 
             prop_address.mSelector = kAudioDevicePropertyBufferFrameSize;
@@ -724,8 +925,9 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                 deinit_refresh_devices(&rd);
                 return SoundIoErrorOpeningDevice;
             }
-            double use_sample_rate = rd.device->sample_rate_current;
-            rd.device->software_latency_current = buffer_frame_size / use_sample_rate;
+            double use_sample_rate = rd.device_shared->sample_rate_current;
+            rd.device_shared->software_latency_current = buffer_frame_size / use_sample_rate;
+            rd.device_raw->software_latency_current = buffer_frame_size / use_sample_rate;
 
             prop_address.mSelector = kAudioDevicePropertyBufferFrameSizeRange;
             prop_address.mScope = aim_to_scope(aim);
@@ -738,37 +940,45 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                 deinit_refresh_devices(&rd);
                 return SoundIoErrorOpeningDevice;
             }
-            rd.device->software_latency_min = avr.mMinimum / use_sample_rate;
-            rd.device->software_latency_max = avr.mMaximum / use_sample_rate;
+            rd.device_shared->software_latency_min = avr.mMinimum / use_sample_rate;
+            rd.device_raw->software_latency_max = avr.mMaximum / use_sample_rate;
 
             prop_address.mSelector = kAudioDevicePropertyLatency;
             prop_address.mScope = aim_to_scope(aim);
             prop_address.mElement = kAudioObjectPropertyElementMaster;
             io_size = sizeof(UInt32);
             if ((os_err = AudioObjectGetPropertyData(device_id, &prop_address, 0, NULL,
-                &io_size, &dca->latency_frames)))
+                &io_size, &dca_shared->latency_frames)))
             {
                 deinit_refresh_devices(&rd);
                 return SoundIoErrorOpeningDevice;
             }
+            dca_raw->latency_frames = dca_shared->latency_frames;
 
             struct SoundIoListDevicePtr *device_list;
-            if (rd.device->aim == SoundIoDeviceAimOutput) {
+            if (rd.device_shared->aim == SoundIoDeviceAimOutput) {
                 device_list = &rd.devices_info->output_devices;
                 if (device_id == default_output_id)
                     rd.devices_info->default_output_index = device_list->length;
             } else {
-                assert(rd.device->aim == SoundIoDeviceAimInput);
+                assert(rd.device_shared->aim == SoundIoDeviceAimInput);
                 device_list = &rd.devices_info->input_devices;
                 if (device_id == default_input_id)
                     rd.devices_info->default_input_index = device_list->length;
             }
 
-            if ((err = SoundIoListDevicePtr_append(device_list, rd.device))) {
+            if ((err = SoundIoListDevicePtr_append(device_list, rd.device_shared))) {
                 deinit_refresh_devices(&rd);
                 return err;
             }
-            rd.device = NULL;
+
+            if ((err = SoundIoListDevicePtr_append(device_list, rd.device_raw))) {
+                deinit_refresh_devices(&rd);
+                return err;
+            }
+
+            rd.device_shared = NULL;
+            rd.device_raw = NULL;
         }
     }
 
@@ -940,10 +1150,10 @@ static int set_ca_desc(enum SoundIoFormat fmt, AudioStreamBasicDescription *desc
         desc->mFormatFlags = kAudioFormatFlagIsSignedInteger;
         desc->mBitsPerChannel = 16;
         break;
-	case SoundIoFormatS24LE:
-		desc->mFormatFlags = kAudioFormatFlagIsSignedInteger;
-		desc->mBitsPerChannel = 24;
-		break;
+    case SoundIoFormatS24LE:
+        desc->mFormatFlags = kAudioFormatFlagIsSignedInteger;
+        desc->mBitsPerChannel = 24;
+        break;
     default:
         return SoundIoErrorIncompatibleDevice;
     }
@@ -1045,10 +1255,10 @@ static int outstream_open_ca(struct SoundIoPrivate *si, struct SoundIoOutStreamP
         return SoundIoErrorOpeningDevice;
     }
 
-	if ((os_err = AudioUnitGetParameter (osca->instance, kHALOutputParam_Volume, kAudioUnitScope_Global, 0, &outstream->volume))) {
-		outstream_destroy_ca(si, os);
-		return SoundIoErrorOpeningDevice;
-	}
+    if ((os_err = AudioUnitGetParameter (osca->instance, kHALOutputParam_Volume, kAudioUnitScope_Global, 0, &outstream->volume))) {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
 
     osca->hardware_latency = dca->latency_frames / (double)outstream->sample_rate;
 
