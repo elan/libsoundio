@@ -10,6 +10,8 @@
 
 #include <assert.h>
 
+#include <AudioToolbox/AudioFormat.h>
+
 static const int OUTPUT_ELEMENT = 0;
 static const int INPUT_ELEMENT = 1;
 
@@ -88,7 +90,7 @@ static AudioObjectPropertyAddress device_listen_props[] = {
         kAudioDevicePropertyBufferFrameSizeRange,
         kAudioObjectPropertyScopeOutput,
         kAudioObjectPropertyElementMaster
-    },
+    }
 };
 
 static enum SoundIoDeviceAim aims[] = {
@@ -400,13 +402,29 @@ static enum SoundIoFormat from_ca_asbd(AudioStreamBasicDescription *desc) {
             return SoundIoFormatS16LE;
         }
         if (desc->mBitsPerChannel == 24) {
-            return SoundIoFormatS24LE;
+            if (flag_in_format(formatFlags, kAudioFormatFlagIsPacked)) {
+                return SoundIoFormatS24PLE;
+            } else {
+                return SoundIoFormatS24LE;
+            }
         }
         if (desc->mBitsPerChannel == 32) {
             return SoundIoFormatS32LE;
         }
     }
     return SoundIoFormatInvalid;
+}
+
+static bool asbd_equal(AudioStreamBasicDescription *a, AudioStreamBasicDescription *b)
+{
+    return (a->mSampleRate == b->mSampleRate &&
+    a->mFormatID == b->mFormatID &&
+    a->mFormatFlags == b->mFormatFlags &&
+    a->mBytesPerPacket == b->mBytesPerPacket &&
+    a->mFramesPerPacket == b->mFramesPerPacket &&
+    a->mBytesPerFrame == b->mBytesPerFrame &&
+    a->mChannelsPerFrame == b->mChannelsPerFrame &&
+    a->mBitsPerChannel == b->mBitsPerChannel);
 }
 
 struct RefreshDevices {
@@ -886,7 +904,6 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                         unique_formats[unique_formats_count++] = asrd_format;
                     }
                 }
-                free(hardware_stream_ids);
                 free(asrds);
 
                 if (unique_sample_rates_count == 1) {
@@ -913,6 +930,7 @@ static int refresh_devices(struct SoundIoPrivate *si) {
 				rd.device_raw->format_count = unique_formats_count;
 				rd.device_raw->formats = unique_formats;
             }
+            free(hardware_stream_ids);
 
             prop_address.mSelector = kAudioDevicePropertyBufferFrameSize;
             prop_address.mScope = aim_to_scope(aim);
@@ -1085,6 +1103,36 @@ static void device_thread_run(void *arg) {
     }
 }
 
+static OSStatus on_physical_format_changed(AudioObjectID in_object_id, UInt32 in_number_addresses,
+    const AudioObjectPropertyAddress in_addresses[], void *in_client_data)
+{
+    struct SoundIoOutStreamPrivate *os = (struct SoundIoOutStreamPrivate *)in_client_data;
+    //struct SoundIoOutStream *outstream = &os->pub;
+    struct SoundIoOutStreamCoreAudio *osca = &os->backend_data.coreaudio;
+
+
+    for (int i = 0; i < in_number_addresses; i++)
+    {
+        if (in_addresses[i].mSelector == kAudioStreamPropertyPhysicalFormat)
+        {
+            // Hardware physical format has changed.
+            AudioStreamBasicDescription new_hardware_format;
+            UInt32 io_size = sizeof(AudioStreamBasicDescription);
+
+            OSStatus os_err;
+            if ((os_err = AudioObjectGetPropertyData(osca->raw_stream_id, &in_addresses[i], 0, NULL, &io_size, &new_hardware_format))) {
+                return os_err;
+            }
+
+            if (SOUNDIO_ATOMIC_LOAD(osca->output_format_match) == false)
+            {
+                SOUNDIO_ATOMIC_STORE(osca->output_format_match, asbd_equal(&new_hardware_format, &osca->hardware_format));
+            }
+        }
+    }
+    return noErr;
+}
+
 static OSStatus on_outstream_device_overload(AudioObjectID in_object_id, UInt32 in_number_addresses,
     const AudioObjectPropertyAddress in_addresses[], void *in_client_data)
 {
@@ -1113,9 +1161,28 @@ static void outstream_destroy_ca(struct SoundIoPrivate *si, struct SoundIoOutStr
         AudioComponentInstanceDispose(osca->instance);
         osca->instance = NULL;
     }
+
+    if (osca->io_proc_id) {
+
+        // Get available formats
+        prop_address.mSelector = kAudioStreamPropertyPhysicalFormat;
+        prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+        prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+        AudioObjectRemovePropertyListener(dca->device_id, &prop_address, on_physical_format_changed, os);
+
+        AudioDeviceStop(dca->device_id, osca->io_proc_id);
+        AudioDeviceDestroyIOProcID(dca->device_id, osca->io_proc_id);
+
+        if (osca->revert_format) {
+            AudioObjectSetPropertyData(osca->raw_stream_id, &prop_address, 0, NULL, sizeof(AudioStreamBasicDescription), &osca->previous_hardware_format);
+        }
+
+        osca->io_proc_id = NULL;
+    }
 }
 
-static OSStatus write_callback_ca(void *userdata, AudioUnitRenderActionFlags *io_action_flags,
+static OSStatus write_callback_ca_shared(void *userdata, AudioUnitRenderActionFlags *io_action_flags,
     const AudioTimeStamp *in_time_stamp, UInt32 in_bus_number, UInt32 in_number_frames,
     AudioBufferList *io_data)
 {
@@ -1129,6 +1196,22 @@ static OSStatus write_callback_ca(void *userdata, AudioUnitRenderActionFlags *io
     outstream->write_callback(outstream, osca->frames_left, osca->frames_left);
     osca->io_data = NULL;
 
+    return noErr;
+}
+
+static OSStatus write_callback_ca_raw(AudioDeviceID inDevice, const AudioTimeStamp *inNow, const AudioBufferList *inInputData, const AudioTimeStamp *inInputTime, AudioBufferList *outOutputData, const AudioTimeStamp *inOutputTime, void *inClientData)
+{
+    struct SoundIoOutStreamPrivate *os = (struct SoundIoOutStreamPrivate *) inClientData;
+    struct SoundIoOutStream *outstream = &os->pub;
+    struct SoundIoOutStreamCoreAudio *osca = &os->backend_data.coreaudio;
+
+    osca->io_data = outOutputData;
+    osca->buffer_index = 0;
+    osca->frames_left = outOutputData->mBuffers[0].mDataByteSize / osca->hardware_format.mBytesPerFrame;
+
+    outstream->write_callback(outstream, osca->frames_left, osca->frames_left);
+
+    osca->io_data = NULL;
     return noErr;
 }
 
@@ -1154,13 +1237,212 @@ static int set_ca_desc(enum SoundIoFormat fmt, AudioStreamBasicDescription *desc
         desc->mFormatFlags = kAudioFormatFlagIsSignedInteger;
         desc->mBitsPerChannel = 24;
         break;
+    case SoundIoFormatS24PLE:
+        desc->mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+        desc->mBitsPerChannel = 24;
     default:
         return SoundIoErrorIncompatibleDevice;
     }
     return 0;
 }
 
-static int outstream_open_ca(struct SoundIoPrivate *si, struct SoundIoOutStreamPrivate *os) {
+static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStreamPrivate *os)
+{
+    struct SoundIoOutStreamCoreAudio *osca = &os->backend_data.coreaudio;
+    struct SoundIoOutStream *outstream = &os->pub;
+    struct SoundIoDevice *device = outstream->device;
+    struct SoundIoDevicePrivate *dev = (struct SoundIoDevicePrivate *)device;
+    struct SoundIoDeviceCoreAudio *dca = &dev->backend_data.coreaudio;
+
+    OSStatus os_err;
+    if ((os_err = AudioDeviceCreateIOProcID(dca->device_id, write_callback_ca_raw, outstream, &osca->io_proc_id)))
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    assert(osca->io_proc_id != NULL);
+
+    if (outstream->software_latency == 0.0)
+        outstream->software_latency = device->software_latency_current;
+
+    outstream->software_latency = soundio_double_clamp(
+            device->software_latency_min,
+            outstream->software_latency,
+            device->software_latency_max);
+
+    AudioObjectPropertyAddress prop_address;
+
+    // Get available formats
+    prop_address.mSelector = kAudioDevicePropertyStreams;
+    prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+    prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+    UInt32 io_size;
+
+    if ((os_err = AudioObjectGetPropertyDataSize(dca->device_id, &prop_address, 0, NULL, &io_size)))
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    AudioStreamID *hardware_stream_ids = (AudioStreamID *)ALLOCATE(char, io_size);
+
+    if ((os_err = AudioObjectGetPropertyData(dca->device_id, &prop_address, 0, NULL, &io_size, hardware_stream_ids)))
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    int stream_count = io_size / sizeof(AudioStreamID);
+    osca->raw_stream_id = -1;
+
+    for (int i = 0; i < stream_count; i++) {
+
+        if (osca->raw_stream_id != -1) {
+            break;
+        }
+        AudioStreamID stream_id = hardware_stream_ids[i];
+
+        prop_address.mSelector = kAudioStreamPropertyDirection;
+        prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+        prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+
+        io_size = sizeof(uint32_t);
+        uint32_t direction = -1;
+
+        if ((os_err = AudioObjectGetPropertyData(stream_id, &prop_address, 0, NULL, &io_size, &direction)))
+        {
+            outstream_destroy_ca(si, os);
+            return SoundIoErrorOpeningDevice;
+        }
+
+        // @constant       kAudioStreamPropertyDirection
+        //        A UInt32 where a value of 0 means that this AudioStream is an output stream
+        //        and a value of 1 means that it is an input stream.
+        if (device->aim == direction) {
+            continue;
+        }
+
+        prop_address.mSelector = kAudioStreamPropertyAvailablePhysicalFormats;
+        prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+        prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+        if ((os_err = AudioObjectGetPropertyDataSize(stream_id, &prop_address, 0, NULL, &io_size)))
+        {
+            outstream_destroy_ca(si, os);
+            return SoundIoErrorOpeningDevice;
+        }
+
+        AudioStreamRangedDescription *asrds = (AudioStreamRangedDescription *)ALLOCATE(char, io_size);
+        int asrd_count = io_size / sizeof(AudioStreamRangedDescription);
+
+        if ((os_err = AudioObjectGetPropertyData(stream_id, &prop_address, 0, NULL, &io_size, asrds)))
+        {
+            outstream_destroy_ca(si, os);
+            return SoundIoErrorOpeningDevice;
+        }
+
+        // Select best
+        for (int j = 0; j < asrd_count; j++)
+        {
+            AudioStreamRangedDescription asrd = asrds[j];
+            enum SoundIoFormat asrd_format = from_ca_asbd(&asrd.mFormat);
+            if (asrd_format == outstream->format && asrd.mFormat.mSampleRate == outstream->sample_rate) {
+                osca->raw_stream_id = stream_id;
+                memcpy(&osca->hardware_format, &asrd.mFormat, sizeof(AudioStreamBasicDescription));
+                break;
+            }
+        }
+        free(asrds);
+    }
+    free(hardware_stream_ids);
+
+    if (osca->raw_stream_id == -1)
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    // get current
+    prop_address.mSelector = kAudioStreamPropertyPhysicalFormat;
+    prop_address.mScope = kAudioDevicePropertyScopeOutput;
+    prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+
+    io_size = sizeof(AudioStreamBasicDescription);
+
+    if ((os_err = AudioObjectGetPropertyData(osca->raw_stream_id, &prop_address, 0, NULL, &io_size, &osca->previous_hardware_format)))
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    if (asbd_equal(&osca->previous_hardware_format, &osca->hardware_format))
+    {
+        osca->revert_format = false;
+        SOUNDIO_ATOMIC_STORE(osca->output_format_match, true);
+    } else {
+        osca->revert_format = true;
+        SOUNDIO_ATOMIC_STORE(osca->output_format_match, false);
+    }
+
+    // Listen to physical format changes
+    prop_address.mSelector = kAudioStreamPropertyPhysicalFormat;
+    prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+    prop_address.mElement = kAudioObjectPropertyElementMaster;
+
+    AudioObjectAddPropertyListener(osca->raw_stream_id, &prop_address, on_physical_format_changed, os);
+
+    // Attempt to change
+    if (osca->revert_format)
+    {
+        if ((os_err = AudioObjectSetPropertyData(osca->raw_stream_id, &prop_address, 0, NULL, io_size, &osca->hardware_format)))
+        {
+            outstream_destroy_ca(si, os);
+            return SoundIoErrorOpeningDevice;
+        }
+
+        // wait for hardware
+        struct timespec delay;
+        int second_timer = 0;
+        while (!SOUNDIO_ATOMIC_LOAD(osca->output_format_match) && second_timer < 100) {
+
+            delay.tv_sec = 0;
+            delay.tv_nsec = 1E7L;  /* 10ms in ns */
+
+            if (nanosleep(&delay, NULL)) {
+                outstream_destroy_ca(si, os);
+                return SoundIoErrorOpeningDevice;
+            }
+            second_timer++;
+        }
+
+    }
+
+    if (!SOUNDIO_ATOMIC_LOAD(osca->output_format_match))
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    prop_address.mSelector = kAudioDeviceProcessorOverload;
+    prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+    prop_address.mElement = OUTPUT_ELEMENT;
+    if ((os_err = AudioObjectAddPropertyListener(dca->device_id, &prop_address,
+        on_outstream_device_overload, os)))
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    osca->hardware_latency = dca->latency_frames / (double)outstream->sample_rate;
+
+    return 0;
+}
+
+static int outstream_open_ca_shared(struct SoundIoPrivate *si, struct SoundIoOutStreamPrivate *os) {
     struct SoundIoOutStreamCoreAudio *osca = &os->backend_data.coreaudio;
     struct SoundIoOutStream *outstream = &os->pub;
     struct SoundIoDevice *device = outstream->device;
@@ -1224,7 +1506,7 @@ static int outstream_open_ca(struct SoundIoPrivate *si, struct SoundIoOutStreamP
         return SoundIoErrorIncompatibleDevice;
     }
 
-    AURenderCallbackStruct render_callback = {write_callback_ca, os};
+    AURenderCallbackStruct render_callback = {write_callback_ca_shared, os};
     if ((os_err = AudioUnitSetProperty(osca->instance, kAudioUnitProperty_SetRenderCallback,
         kAudioUnitScope_Input, OUTPUT_ELEMENT, &render_callback, sizeof(AURenderCallbackStruct))))
     {
@@ -1265,19 +1547,48 @@ static int outstream_open_ca(struct SoundIoPrivate *si, struct SoundIoOutStreamP
     return 0;
 }
 
-static int outstream_pause_ca(struct SoundIoPrivate *si, struct SoundIoOutStreamPrivate *os, bool pause) {
+static int outstream_open_ca(struct SoundIoPrivate *si, struct SoundIoOutStreamPrivate *os) {
+    struct SoundIoOutStream *outstream = &os->pub;
+    struct SoundIoDevice *device = outstream->device;
+    if (device->is_raw) {
+        return outstream_open_ca_raw(si, os);
+    } else {
+        assert(!device->is_raw);
+        return outstream_open_ca_shared(si, os);
+    }
+}
+
+static int outstream_pause_ca(struct SoundIoPrivate *si, struct SoundIoOutStreamPrivate *os, bool pause)
+{
     struct SoundIoOutStreamCoreAudio *osca = &os->backend_data.coreaudio;
+    struct SoundIoOutStream *outstream = &os->pub;
+    struct SoundIoDevice *device = outstream->device;
+    struct SoundIoDevicePrivate *dev = (struct SoundIoDevicePrivate *)device;
+    struct SoundIoDeviceCoreAudio *dca = &dev->backend_data.coreaudio;
+
     OSStatus os_err;
-    if (pause) {
-        if ((os_err = AudioOutputUnitStop(osca->instance))) {
-            return SoundIoErrorStreaming;
+
+    if (device->is_raw) {
+        if (pause) {
+            if ((os_err = AudioDeviceStop(dca->device_id, osca->io_proc_id))) {
+                return SoundIoErrorStreaming;
+            }
+        } else {
+            if ((os_err = AudioDeviceStart(dca->device_id, osca->io_proc_id))) {
+                return SoundIoErrorStreaming;
+            }
         }
     } else {
-        if ((os_err = AudioOutputUnitStart(osca->instance))) {
-            return SoundIoErrorStreaming;
+        if (pause) {
+            if ((os_err = AudioOutputUnitStop(osca->instance))) {
+                return SoundIoErrorStreaming;
+            }
+        } else {
+            if ((os_err = AudioOutputUnitStart(osca->instance))) {
+                return SoundIoErrorStreaming;
+            }
         }
     }
-
     return 0;
 }
 
