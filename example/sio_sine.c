@@ -33,6 +33,64 @@ static void write_sample_s16ne(char *ptr, double sample) {
     *buf = val;
 }
 
+static uint32_t convert(double f) {
+	// Special code for NaN and infinity...
+	if(isnan(f) || !isfinite(f)) {
+		return 0;
+	}
+	
+	// Make sure f is in the conversion range
+	// Use a 'double' here to support all normal float values for f.
+	double t = f * 8388608.0;
+	double a = fabs(t);
+	if(a > 8388608.0f) {
+		if(f > 0) {
+			// f is a 'large' number (>=1.0)
+			// return the largest integer.
+			return 0x007FFFFF;
+		} else {
+			// f is a 'large negative' number (<= -1.0)
+			// return the largest negative integer
+			return 0x00800000;
+		}
+	} else {
+		// Manual two's complement integer creation
+		if(f >= 0) {
+			return (uint32_t) a;
+		} else {
+			return 0x01000000 - (uint32_t) a;
+		}
+	}
+}
+
+static void write_sample_s24ne(char *ptr, double sample) {
+	const uint32_t val = convert(sample);
+	const uint8_t *src = (const uint8_t *)&val;
+    uint8_t *dest = (uint8_t *)ptr;
+	const uint32_t *dest32 = (uint32_t *)dest;
+/*#if defined(SOUNDIO_OS_BIG_ENDIAN)
+	*dest++ = *src++;
+#endif*/
+	*dest++ = src[0];
+    *dest++ = src[1];
+    *dest++ = src[2];
+    *dest++ = src[3	];
+/*#if defined(SOUNDIO_OS_LITTLE_ENDIAN)
+    *dest++ = 0;*/
+	dest32++;
+//#endif
+}
+
+static void write_sample_s24ple(char *ptr, double sample) {
+	const int32_t val = round(sample * 0x800000);
+    const uint8_t *src = (const uint8_t *)&val;
+    uint8_t *dest = (uint8_t *)ptr;
+	fprintf(stderr, "0x%x", val);
+    *dest++ = *src++;
+    *dest++ = *src++;
+    *dest++ = *src++;
+}
+
 static void write_sample_s32ne(char *ptr, double sample) {
     int32_t *buf = (int32_t *)ptr;
     double range = (double)INT32_MAX - (double)INT32_MIN;
@@ -232,7 +290,13 @@ int main(int argc, char **argv) {
     } else if (soundio_device_supports_format(device, SoundIoFormatS16NE)) {
         outstream->format = SoundIoFormatS16NE;
         write_sample = write_sample_s16ne;
-    } else {
+    } else if (soundio_device_supports_format(device, SoundIoFormatS24NE)) {
+        outstream->format = SoundIoFormatS24NE;
+        write_sample = write_sample_s24ne;
+    } else if (soundio_device_supports_format(device, SoundIoFormatS24PLE)) {
+        outstream->format = SoundIoFormatS24PLE;
+        write_sample = write_sample_s24ple;
+    }else {
         fprintf(stderr, "No suitable device format available.\n");
         return 1;
     }
