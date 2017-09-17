@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <ctype.h>
 #include <math.h>
 
 static int usage(char *exe) {
@@ -33,59 +34,44 @@ static void write_sample_s16ne(char *ptr, double sample) {
     *buf = val;
 }
 
-static uint32_t convert(double f) {
-	// Special code for NaN and infinity...
-	if(isnan(f) || !isfinite(f)) {
-		return 0;
-	}
-	
-	// Make sure f is in the conversion range
-	// Use a 'double' here to support all normal float values for f.
-	double t = f * 8388608.0;
-	double a = fabs(t);
-	if(a > 8388608.0f) {
-		if(f > 0) {
-			// f is a 'large' number (>=1.0)
-			// return the largest integer.
-			return 0x007FFFFF;
-		} else {
-			// f is a 'large negative' number (<= -1.0)
-			// return the largest negative integer
-			return 0x00800000;
-		}
-	} else {
-		// Manual two's complement integer creation
-		if(f >= 0) {
-			return (uint32_t) a;
-		} else {
-			return 0x01000000 - (uint32_t) a;
-		}
-	}
+/**
+ * Construct a signed 24 bit integer from three bytes into a int32_t.
+ */
+static int32_t construct_s24(uint8_t low, uint8_t mid, uint8_t high)
+{
+    return (int32_t)low | ((int32_t)mid << 8) | ((int32_t)high << 16) |
+        /* extend the sign bit */
+        (high & 0x80 ? ~(int32_t)0xffffff : 0);
+}
+
+/**
+ * Read a packed signed native-endian 24 bit integer.
+ */
+static int32_t read_s24(const uint8_t *src)
+{
+#if defined(SOUNDIO_OS_BIG_ENDIAN)
+    return construct_s24(src[2], src[1], src[0]);
+#elif defined(SOUNDIO_OS_LITTLE_ENDIAN)
+    return construct_s24(src[0], src[1], src[2]);
+#endif
 }
 
 static void write_sample_s24ne(char *ptr, double sample) {
-	const uint32_t val = convert(sample);
-	const uint8_t *src = (const uint8_t *)&val;
-    uint8_t *dest = (uint8_t *)ptr;
-	const uint32_t *dest32 = (uint32_t *)dest;
-/*#if defined(SOUNDIO_OS_BIG_ENDIAN)
-	*dest++ = *src++;
-#endif*/
-	*dest++ = src[0];
-    *dest++ = src[1];
-    *dest++ = src[2];
-    *dest++ = src[3	];
-/*#if defined(SOUNDIO_OS_LITTLE_ENDIAN)
-    *dest++ = 0;*/
-	dest32++;
-//#endif
+    const double range = (double)0xFFFFFF;
+    const double val = sample * range / 2.0;
+    const int32_t src0 = val;
+    const int32_t src = read_s24((const uint8_t *)&src0);
+	int32_t *dest = (int32_t *)ptr;
+	*dest = src;
 }
 
 static void write_sample_s24ple(char *ptr, double sample) {
-	const int32_t val = round(sample * 0x800000);
-    const uint8_t *src = (const uint8_t *)&val;
+    const double range = 0xFFFFFF;
+    const double val = sample * range / 2.0;
+    const int32_t src0 = val;
+    const uint8_t *src = (const uint8_t *)&src0;
     uint8_t *dest = (uint8_t *)ptr;
-	fprintf(stderr, "0x%x", val);
+
     *dest++ = *src++;
     *dest++ = *src++;
     *dest++ = *src++;
@@ -135,12 +121,13 @@ static void write_callback(struct SoundIoOutStream *outstream, int frame_count_m
         double pitch = 440.0;
         double radians_per_second = pitch * 2.0 * PI;
         for (int frame = 0; frame < frame_count; frame += 1) {
-            double sample = sin((seconds_offset + frame * seconds_per_frame) * radians_per_second);
+            double sample = sin((seconds_offset + frame * seconds_per_frame) * radians_per_second) * 0.05;
             for (int channel = 0; channel < layout->channel_count; channel += 1) {
                 write_sample(areas[channel].ptr, sample);
                 areas[channel].ptr += areas[channel].step;
             }
         }
+
         seconds_offset = fmod(seconds_offset + seconds_per_frame * frame_count, 1.0);
 
         if ((err = soundio_outstream_end_write(outstream))) {
