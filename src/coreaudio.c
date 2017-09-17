@@ -851,7 +851,7 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                     continue;
                 }
 
-                prop_address.mSelector = kAudioStreamPropertyAvailablePhysicalFormats;
+                prop_address.mSelector = kAudioStreamPropertyAvailableVirtualFormats;
                 prop_address.mScope = kAudioObjectPropertyScopeGlobal;
                 prop_address.mElement = kAudioObjectPropertyElementMaster;
 
@@ -1122,7 +1122,7 @@ static OSStatus on_physical_format_changed(AudioObjectID in_object_id, UInt32 in
 
     for (int i = 0; i < in_number_addresses; i++)
     {
-        if (in_addresses[i].mSelector == kAudioStreamPropertyPhysicalFormat)
+        if (in_addresses[i].mSelector == kAudioStreamPropertyVirtualFormat)
         {
             // Hardware physical format has changed.
             AudioStreamBasicDescription new_hardware_format;
@@ -1173,8 +1173,7 @@ static void outstream_destroy_ca(struct SoundIoPrivate *si, struct SoundIoOutStr
 
     if (osca->io_proc_id) {
 
-        // Get available formats
-        prop_address.mSelector = kAudioStreamPropertyPhysicalFormat;
+        prop_address.mSelector = kAudioStreamPropertyVirtualFormat;
         prop_address.mScope = kAudioObjectPropertyScopeGlobal;
         prop_address.mElement = kAudioObjectPropertyElementMaster;
 
@@ -1183,11 +1182,23 @@ static void outstream_destroy_ca(struct SoundIoPrivate *si, struct SoundIoOutStr
         AudioDeviceStop(dca->device_id, osca->io_proc_id);
         AudioDeviceDestroyIOProcID(dca->device_id, osca->io_proc_id);
 
+        uint32_t io_size = sizeof(AudioStreamBasicDescription);
+
         if (osca->revert_format) {
-            AudioObjectSetPropertyData(osca->raw_stream_id, &prop_address, 0, NULL, sizeof(AudioStreamBasicDescription), &osca->previous_hardware_format);
+            AudioObjectSetPropertyData(osca->raw_stream_id, &prop_address, 0, NULL, io_size, &osca->previous_hardware_format);
         }
 
         osca->io_proc_id = NULL;
+
+        // unhog device
+        prop_address.mElement = kAudioObjectPropertyElementMaster;
+        prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+        prop_address.mSelector = kAudioDevicePropertyHogMode;
+
+        io_size = sizeof(pid_t);
+
+        pid_t hogmode_pid;
+        AudioObjectGetPropertyData(dca->device_id, &prop_address, 0, NULL, &io_size, &hogmode_pid);
     }
 }
 
@@ -1281,13 +1292,52 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
             device->software_latency_max);
 
     AudioObjectPropertyAddress prop_address;
+    UInt32 io_size;
+
+    // hog device
+    prop_address.mElement = kAudioObjectPropertyElementMaster;
+    prop_address.mScope = kAudioObjectPropertyScopeGlobal;
+    prop_address.mSelector = kAudioDevicePropertyHogMode;
+
+    pid_t pid = getpid();
+	pid_t hogmode_pid, current_pid = -1;
+    io_size = sizeof(pid_t);
+
+    if ((os_err = AudioObjectGetPropertyData(dca->device_id, &prop_address, 0, NULL, &io_size, &hogmode_pid)))
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    if (hogmode_pid != pid) {
+        if (hogmode_pid != -1) {
+            // device is exclusively in use by another process
+            outstream_destroy_ca(si, os);
+            return SoundIoErrorOpeningDevice;
+        }
+        if ((os_err = AudioObjectSetPropertyData(dca->device_id, &prop_address, 0, NULL, io_size, &hogmode_pid)))
+        {
+            outstream_destroy_ca(si, os);
+            return SoundIoErrorOpeningDevice;
+        }
+    }
+
+    if ((os_err = AudioObjectGetPropertyData(dca->device_id, &prop_address, 0, NULL, &io_size, &current_pid)))
+    {
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
+
+    if (current_pid != pid) {
+        // Could not hog device
+        outstream_destroy_ca(si, os);
+        return SoundIoErrorOpeningDevice;
+    }
 
     // Get available formats
     prop_address.mSelector = kAudioDevicePropertyStreams;
     prop_address.mScope = kAudioObjectPropertyScopeGlobal;
     prop_address.mElement = kAudioObjectPropertyElementMaster;
-
-    UInt32 io_size;
 
     if ((os_err = AudioObjectGetPropertyDataSize(dca->device_id, &prop_address, 0, NULL, &io_size)))
     {
@@ -1334,7 +1384,7 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
             continue;
         }
 
-        prop_address.mSelector = kAudioStreamPropertyAvailablePhysicalFormats;
+        prop_address.mSelector = kAudioStreamPropertyAvailableVirtualFormats;
         prop_address.mScope = kAudioObjectPropertyScopeGlobal;
         prop_address.mElement = kAudioObjectPropertyElementMaster;
 
@@ -1398,7 +1448,7 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
     }
 
     // get current
-    prop_address.mSelector = kAudioStreamPropertyPhysicalFormat;
+    prop_address.mSelector = kAudioStreamPropertyVirtualFormat;
     prop_address.mScope = kAudioDevicePropertyScopeOutput;
     prop_address.mElement = kAudioObjectPropertyElementMaster;
 
@@ -1421,7 +1471,7 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
     }
 
     // Listen to physical format changes
-    prop_address.mSelector = kAudioStreamPropertyPhysicalFormat;
+    prop_address.mSelector = kAudioStreamPropertyVirtualFormat;
     prop_address.mScope = kAudioObjectPropertyScopeGlobal;
     prop_address.mElement = kAudioObjectPropertyElementMaster;
 

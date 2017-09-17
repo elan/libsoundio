@@ -60,6 +60,7 @@ struct SoundIoOutStreamCoreAudio {
     struct SoundIoChannelArea areas[SOUNDIO_MAX_CHANNELS];
     struct SoundIoAtomicBool output_format_match;
     bool revert_format;
+    bool raw_integer_mode_support;
 };
 
 struct SoundIoInStreamCoreAudio {
