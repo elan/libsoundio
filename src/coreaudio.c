@@ -1051,6 +1051,8 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                 return SoundIoErrorOpeningDevice;
             }
             rd.device_shared->software_latency_min = avr.mMinimum / use_sample_rate;
+            rd.device_raw->software_latency_min = avr.mMinimum / use_sample_rate;
+            rd.device_shared->software_latency_max = avr.mMaximum / use_sample_rate;
             rd.device_raw->software_latency_max = avr.mMaximum / use_sample_rate;
 
             prop_address.mSelector = kAudioDevicePropertyLatency;
