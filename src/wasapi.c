@@ -1269,7 +1269,7 @@ static int outstream_do_open(struct SoundIoPrivate *si, struct SoundIoOutStreamP
         flags = osw->need_resample ? AUDCLNT_STREAMFLAGS_RATEADJUST : 0;
         share_mode = AUDCLNT_SHAREMODE_SHARED;
         periodicity = 0;
-        buffer_duration = to_reference_time(4.0);
+        buffer_duration = to_reference_time(0.150);
     }
     to_wave_format_layout(&outstream->layout, &wave_format);
     to_wave_format_format(outstream->format, &wave_format);
