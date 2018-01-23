@@ -302,7 +302,7 @@ enum SoundIoFormat {
 #error unknown byte order
 #endif
 
-#define SOUNDIO_MAX_CHANNELS 24
+#define SOUNDIO_MAX_CHANNELS 32
 /// The size of this struct is OK to use.
 struct SoundIoChannelLayout {
     const char *name;
