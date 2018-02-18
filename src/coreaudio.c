@@ -1445,6 +1445,18 @@ int soundio_coreaudio_init(struct SoundIoPrivate *si) {
         destroy_ca(si);
         return SoundIoErrorSystemResources;
     }
+    
+    AudioObjectPropertyAddress prop2_address = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMaster
+    };
+    if ((err = AudioObjectAddPropertyListener(kAudioObjectSystemObject, &prop2_address,
+        on_devices_changed, si)))
+    {
+        destroy_ca(si);
+        return SoundIoErrorSystemResources;
+    }
 
     prop_address.mSelector = kAudioHardwarePropertyServiceRestarted;
     if ((err = AudioObjectAddPropertyListener(kAudioObjectSystemObject, &prop_address,
