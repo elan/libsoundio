@@ -486,7 +486,6 @@ static int refresh_devices(struct SoundIoPrivate *si) {
     for (int device_i = 0; device_i < device_count; device_i += 1) {
         AudioObjectID device_id = rd.devices[device_i];
 
-        bool bad_device = false;
         for (int i = 0; i < ARRAY_LENGTH(device_listen_props); i += 1) {
             if ((err = SoundIoListAudioDeviceID_add_one(&sica->registered_listeners))) {
                 deinit_refresh_devices(&rd);
@@ -495,20 +494,14 @@ static int refresh_devices(struct SoundIoPrivate *si) {
             if ((os_err = AudioObjectAddPropertyListener(device_id, &device_listen_props[i],
                 on_devices_changed, si)))
             {
-                bad_device = true;
+                deinit_refresh_devices(&rd);
+                return SoundIoErrorOpeningDevice;
             }
             
             AudioDeviceID *last_device_id = SoundIoListAudioDeviceID_last_ptr(&sica->registered_listeners);
             *last_device_id = device_id;
         }
         
-        // Skip bad devices, they may be on their way out.
-        if (bad_device)
-        {
-            fprintf(stderr, "soundio: Bad device, skipping.\n");
-            continue;
-        }
-
         prop_address.mSelector = kAudioObjectPropertyName;
         prop_address.mScope = kAudioObjectPropertyScopeGlobal;
         prop_address.mElement = kAudioObjectPropertyElementMaster;
@@ -898,7 +891,11 @@ static void device_thread_run(void *arg) {
         }
         if (SOUNDIO_ATOMIC_EXCHANGE(sica->device_scan_queued, false)) {
             err = refresh_devices(si);
-            if (err) {
+
+            // If there was an error opening the device, don't panic, it might just be a device
+            // getting unplugged.
+            //
+            if (err && err != SoundIoErrorOpeningDevice) {
                 shutdown_backend(si, err);
                 return;
             }
