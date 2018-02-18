@@ -571,6 +571,7 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                 return SoundIoErrorNoMem;
             }
             struct SoundIoDevice *device = &dev->pub;
+            device->type = SoundIoDeviceTypeUnknown;
             device->ref_count = 1;
             device->soundio = soundio;
             device->is_raw = false;

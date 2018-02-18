@@ -15,6 +15,7 @@
 
 #include <CoreAudio/CoreAudio.h>
 #include <AudioUnit/AudioUnit.h>
+#include <IOKit/audio/IOAudioTypes.h>
 
 struct SoundIoPrivate;
 int soundio_coreaudio_init(struct SoundIoPrivate *si);
