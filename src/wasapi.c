@@ -790,6 +790,7 @@ static int refresh_devices(struct SoundIoPrivate *si) {
         rd.device_shared->soundio = soundio;
         rd.device_shared->is_raw = false;
         rd.device_shared->software_latency_max = 2.0;
+        rd.device_shared->type = SoundIoDeviceTypeUnknown;
 
         struct SoundIoDevicePrivate *dev_raw = ALLOCATE(struct SoundIoDevicePrivate, 1);
         if (!dev_raw) {

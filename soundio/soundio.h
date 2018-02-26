@@ -230,6 +230,13 @@ enum SoundIoDeviceAim {
     SoundIoDeviceAimOutput, ///< playback
 };
 
+enum SoundIoDeviceType {
+  SoundIoDeviceTypeUnknown,
+  SoundIoDeviceTypeInternalSpeaker,
+  SoundIoDeviceTypeExternalSpeaker,
+  SoundIoDeviceTypeHeadphones,
+};
+
 /// For your convenience, Native Endian and Foreign Endian constants are defined
 /// which point to the respective SoundIoFormat values.
 enum SoundIoFormat {
@@ -403,6 +410,9 @@ struct SoundIoDevice {
 
     /// Tells whether this device is an input device or an output device.
     enum SoundIoDeviceAim aim;
+
+    /// Tells the type of the device.
+    enum SoundIoDeviceType type;
 
     /// Channel layouts are handled similarly to SoundIoDevice::formats.
     /// If this information is missing due to a SoundIoDevice::probe_error,

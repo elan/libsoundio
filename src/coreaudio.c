@@ -1023,7 +1023,36 @@ static int refresh_devices(struct SoundIoPrivate *si) {
             }
             rd.device_raw->format_count = unique_formats_count;
             rd.device_raw->formats = unique_formats;
+			
+            // Figure out device connection type.
+            rd.device_shared->type = SoundIoDeviceTypeUnknown;
+            if (rd.device_shared->aim == SoundIoDeviceAimOutput)
+            {
+                prop_address.mSelector = kAudioDevicePropertyDataSource;
+                prop_address.mScope = aim_to_scope(aim);
+                prop_address.mElement = kAudioObjectPropertyElementMaster;
+                io_size = sizeof(UInt32);
+                UInt32 source_code;
 
+                os_err = AudioObjectGetPropertyData(device_id, &prop_address, 0, NULL, &io_size, &source_code);
+                if (!os_err)
+                {
+                    switch (source_code)
+                    {
+                    case kIOAudioOutputPortSubTypeInternalSpeaker:
+                      rd.device_shared->type = SoundIoDeviceTypeInternalSpeaker;
+                      break;
+                    case kIOAudioOutputPortSubTypeExternalSpeaker:
+                      rd.device_shared->type = SoundIoDeviceTypeExternalSpeaker;
+                      break;
+                    case kIOAudioOutputPortSubTypeHeadphones:
+                      rd.device_shared->type = SoundIoDeviceTypeHeadphones;
+                      break;
+                    }
+                }
+				rd.device_raw->type = rd.device_shared.type;
+            }
+			
             prop_address.mSelector = kAudioDevicePropertyBufferFrameSize;
             prop_address.mScope = aim_to_scope(aim);
             prop_address.mElement = kAudioObjectPropertyElementMaster;
