@@ -490,6 +490,11 @@ struct SoundIoDevice {
     /// resampling and thus tend to have fewer formats available.
     bool is_raw;
 
+    /// In addition to supporting raw mode (allowing exclusive access to the device)
+    /// a device requires support for accepting audio in an integer format (typically
+    /// 24-bit) to provide support for "bit-perfect" playback.
+    bool supports_integer_mode;
+
     /// Devices are reference counted. See ::soundio_device_ref and
     /// ::soundio_device_unref.
     int ref_count;

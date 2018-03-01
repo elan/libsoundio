@@ -701,11 +701,11 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                 deinit_refresh_devices(&rd);
                 return SoundIoErrorOpeningDevice;
             }
-            
+
             AudioDeviceID *last_device_id = SoundIoListAudioDeviceID_last_ptr(&sica->registered_listeners);
             *last_device_id = device_id;
         }
-        
+
         prop_address.mSelector = kAudioObjectPropertyName;
         prop_address.mScope = kAudioObjectPropertyScopeGlobal;
         prop_address.mElement = kAudioObjectPropertyElementMaster;
@@ -798,6 +798,7 @@ static int refresh_devices(struct SoundIoPrivate *si) {
             rd.device_shared->ref_count = 1;
             rd.device_shared->soundio = soundio;
             rd.device_shared->is_raw = false;
+            rd.device_shared->supports_integer_mode = false;
             rd.device_shared->aim = aim;
             rd.device_shared->id = soundio_str_dupe(rd.device_uid, rd.device_uid_len);
             rd.device_shared->name = soundio_str_dupe(rd.device_name, rd.device_name_len);
@@ -820,6 +821,7 @@ static int refresh_devices(struct SoundIoPrivate *si) {
             rd.device_raw->ref_count = 1;
             rd.device_raw->soundio = soundio;
             rd.device_raw->is_raw = true;
+            rd.device_raw->supports_integer_mode = false;
             rd.device_raw->aim = aim;
             rd.device_raw->id = soundio_str_dupe(rd.device_uid, rd.device_uid_len);
             rd.device_raw->name = soundio_str_dupe(rd.device_name, rd.device_name_len);
@@ -969,7 +971,9 @@ static int refresh_devices(struct SoundIoPrivate *si) {
             AudioStreamRangedDescription asrd;
 
             for (int i = 0; i < stream_format_count; i++) {
-
+                if (stream_formats[i].physical_integer_match == true) {
+                    rd.device_raw->supports_integer_mode = true;
+                }
                 asrd = stream_formats[i].asrd;
                 is_unique = true;
 
@@ -1024,7 +1028,7 @@ static int refresh_devices(struct SoundIoPrivate *si) {
             }
             rd.device_raw->format_count = unique_formats_count;
             rd.device_raw->formats = unique_formats;
-			
+
             // Figure out device connection type.
             rd.device_shared->type = SoundIoDeviceTypeUnknown;
             if (rd.device_shared->aim == SoundIoDeviceAimOutput)
@@ -1051,9 +1055,9 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                       break;
                     }
                 }
-				rd.device_raw->type = rd.device_shared.type;
+				rd.device_raw->type = rd.device_shared->type;
             }
-			
+
             prop_address.mSelector = kAudioDevicePropertyBufferFrameSize;
             prop_address.mScope = aim_to_scope(aim);
             prop_address.mElement = kAudioObjectPropertyElementMaster;
@@ -1113,12 +1117,10 @@ static int refresh_devices(struct SoundIoPrivate *si) {
                 deinit_refresh_devices(&rd);
                 return err;
             }
-
             if ((err = SoundIoListDevicePtr_append(device_list, rd.device_raw))) {
                 deinit_refresh_devices(&rd);
                 return err;
             }
-
             rd.device_shared = NULL;
             rd.device_raw = NULL;
         }
@@ -2202,7 +2204,7 @@ int soundio_coreaudio_init(struct SoundIoPrivate *si) {
         destroy_ca(si);
         return SoundIoErrorSystemResources;
     }
-    
+
     AudioObjectPropertyAddress prop2_address = {
         kAudioHardwarePropertyDefaultOutputDevice,
         kAudioObjectPropertyScopeGlobal,

@@ -38,7 +38,8 @@ static bool short_output = false;
 static void print_device(struct SoundIoDevice *device, bool is_default) {
     const char *default_str = is_default ? " (default)" : "";
     const char *raw_str = device->is_raw ? " (raw)" : "";
-    fprintf(stderr, "%s%s%s\n", device->name, default_str, raw_str);
+    const char *int_str = device->supports_integer_mode ? " (integer)" : "";
+    fprintf(stderr, "%s%s%s%s\n", device->name, default_str, raw_str, int_str);
     if (short_output)
         return;
     fprintf(stderr, "  id: %s\n", device->id);
