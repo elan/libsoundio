@@ -1564,7 +1564,7 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
     }
 
     if (buffer_frame_size % osca->hardware_format.mBytesPerFrame != 0) {
-        buffer_frame_size = (osca->hardware_format.mBytesPerFrame == 24 ? 768 : 512);
+        buffer_frame_size = (osca->hardware_format.mBytesPerFrame == 6 ? 768 : 512);
 
         if ((os_err = AudioObjectSetPropertyData(dca->device_id, &prop_address, 0, NULL, io_size, &buffer_frame_size)))
         {
