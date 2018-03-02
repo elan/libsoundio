@@ -1549,7 +1549,7 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
         outstream_destroy_ca(si, os);
         return SoundIoErrorOpeningDevice;
     }
-
+	/**
     // check buffer size is acceptable
     prop_address.mSelector = kAudioDevicePropertyBufferFrameSize;
     prop_address.mScope = kAudioObjectPropertyScopeGlobal;
@@ -1571,7 +1571,7 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
             outstream_destroy_ca(si, os);
             return SoundIoErrorOpeningDevice;
         }
-    }
+    }*/
 
     // get current
     prop_address.mSelector = kAudioStreamPropertyVirtualFormat;
