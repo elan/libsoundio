@@ -1549,29 +1549,6 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
         outstream_destroy_ca(si, os);
         return SoundIoErrorOpeningDevice;
     }
-	/**
-    // check buffer size is acceptable
-    prop_address.mSelector = kAudioDevicePropertyBufferFrameSize;
-    prop_address.mScope = kAudioObjectPropertyScopeGlobal;
-    prop_address.mElement = kAudioObjectPropertyElementMaster;
-
-    io_size = sizeof(UInt32);
-    UInt32 buffer_frame_size;
-    if ((os_err = AudioObjectGetPropertyData(dca->device_id, &prop_address, 0, NULL, &io_size, &buffer_frame_size)))
-    {
-        outstream_destroy_ca(si, os);
-        return SoundIoErrorOpeningDevice;
-    }
-
-    if (buffer_frame_size % osca->hardware_format.mBytesPerFrame != 0) {
-        buffer_frame_size = (osca->hardware_format.mBytesPerFrame == 6 ? 768 : 512);
-
-        if ((os_err = AudioObjectSetPropertyData(dca->device_id, &prop_address, 0, NULL, io_size, &buffer_frame_size)))
-        {
-            outstream_destroy_ca(si, os);
-            return SoundIoErrorOpeningDevice;
-        }
-    }*/
 
     // get current
     prop_address.mSelector = kAudioStreamPropertyVirtualFormat;
@@ -1606,7 +1583,7 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
 		outstream_destroy_ca(si, os);
 		return SoundIoErrorOpeningDevice;
 	}
-	
+
     // Attempt to change
 	prop_address.mSelector = kAudioStreamPropertyPhysicalFormat;
     if (osca->revert_format)
