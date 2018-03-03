@@ -1303,7 +1303,7 @@ static void outstream_destroy_ca(struct SoundIoPrivate *si, struct SoundIoOutStr
         prop_address.mScope = kAudioObjectPropertyScopeGlobal;
         prop_address.mElement = kAudioObjectPropertyElementMaster;
 
-        AudioObjectRemovePropertyListener(dca->device_id, &prop_address, on_physical_format_changed, os);
+        AudioObjectRemovePropertyListener(osca->raw_stream_id, &prop_address, on_physical_format_changed, os);
 
         AudioDeviceStop(dca->device_id, osca->io_proc_id);
         AudioDeviceDestroyIOProcID(dca->device_id, osca->io_proc_id);
