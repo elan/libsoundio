@@ -1596,14 +1596,19 @@ static int outstream_open_ca_raw(struct SoundIoPrivate *si, struct SoundIoOutStr
         SOUNDIO_ATOMIC_STORE(osca->output_format_match, false);
     }
 
-    // Listen to physical format changes
+    // Listen to virtual format changes
     prop_address.mSelector = kAudioStreamPropertyVirtualFormat;
     prop_address.mScope = kAudioObjectPropertyScopeGlobal;
     prop_address.mElement = kAudioObjectPropertyElementMaster;
 
-    AudioObjectAddPropertyListener(osca->raw_stream_id, &prop_address, on_physical_format_changed, os);
-
+	if ((os_err = AudioObjectAddPropertyListener(osca->raw_stream_id, &prop_address, on_physical_format_changed, os)))
+	{
+		outstream_destroy_ca(si, os);
+		return SoundIoErrorOpeningDevice;
+	}
+	
     // Attempt to change
+	prop_address.mSelector = kAudioStreamPropertyPhysicalFormat;
     if (osca->revert_format)
     {
         if ((os_err = AudioObjectSetPropertyData(osca->raw_stream_id, &prop_address, 0, NULL, io_size, &osca->hardware_format)))
